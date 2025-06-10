@@ -1,0 +1,17 @@
+
+raw: "/datastore/home/swebb1/data/Buonomo/naiming/ChIP-seq_mar25/raw/fastq_merged"
+
+fs_conf: "/datastore/home/genomes/tool_configs/fastq_screen/fastq_screen.conf"
+
+samples: "samples.tsv"
+attributes: "Sample,Type,Group"
+
+compare: "compare.tsv"
+
+adapter1: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+adapter2: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+
+bwa_index: "annotation/bwa_indexes/mm10"
+
+blacklist: "annotation/mm10.blacklist.bed"
+

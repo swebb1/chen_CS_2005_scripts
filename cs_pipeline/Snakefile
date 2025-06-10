@@ -1,0 +1,296 @@
+import pandas as pd
+import os
+
+##GLOBALS##
+
+configfile: "config.yaml"
+
+raw=config["raw"]
+
+samples = pd.read_table(config["samples"])
+attributes=config["attributes"]
+
+compare = pd.read_table(config["compare"])
+compare_dict = dict(zip(compare['IP'], compare['Input']))
+
+filters = ["total","primary","unique"]
+report_filters = ["total","primary","unique","total_NR","primary_NR","unique_NR"]
+output_filters = ["primary","unique","primary_NR","unique_NR"]
+
+bwa_index = config["bwa_index"]
+adapter1 = config["adapter1"]
+adapter2 = config["adapter2"]
+
+if "blacklist" in config:
+    NR_filters = ["total","primary","unique","total_NR","primary_NR","unique_NR"]
+    report_filters = ["total","primary","unique","total_NR","primary_NR","unique_NR","total_bl","primary_bl","unique_bl","total_NR_bl","primary_NR_bl","unique_NR_bl"]
+    output_filters = ["primary","unique","primary_NR","unique_NR","primary_bl","unique_bl","primary_NR_bl","unique_NR_bl"]
+    blacklist = config["blacklist"]
+
+fs_conf=config["fs_conf"]
+
+reads = [1,2]
+
+print(samples)
+
+##Functions
+
+##Rules
+
+rule all:
+  input:
+    expand("fastq/{sample}.{read}.fq.gz",sample=samples.Sample,read=reads),
+    expand("fastq/{sample}.{read}_fastqc.html",sample=samples.Sample,read=reads),
+    "fastq/multiqc_report.html",
+    expand("cutadapt/{sample}.{read}.cutadapt.fq.gz",sample=samples.Sample,read=reads),
+    expand("cutadapt/{sample}.{read}.cutadapt_fastqc.html",sample=samples.Sample,read=reads),
+    expand("cutadapt/{sample}.{read}.cutadapt_screen.txt",sample=samples.Sample,read=reads),
+    "cutadapt/multiqc_report.html",
+    expand("bwa/{sample}/{sample}.{filter}.flagstat",sample=samples.Sample,filter=filters),
+    expand("bwa/{sample}/{sample}.{filter}.bam",sample=samples.Sample,filter=filters),
+    expand("bwa/{sample}/{sample}.{filter}.bam.bai",sample=samples.Sample,filter=filters),
+    expand("bwa/{sample}/{sample}.{filter}_NR.flagstat",sample=samples.Sample,filter=filters),
+    expand("bwa/{sample}/{sample}.{filter}_NR.bam",sample=samples.Sample,filter=filters),
+    expand("bwa/{sample}/{sample}.{filter}_NR.bam.bai",sample=samples.Sample,filter=filters),
+    "bwa/multiqc_report.html",
+    "bwa/readStats.html",
+    expand("visualisation/{sample}.{out_filters}.bpm.bw",sample=samples.Sample,out_filters=output_filters),
+    expand("deeptools/{filter}_matrix.npz",filter=output_filters),
+    expand("deeptools/{filter}_correlation.pdf",filter=output_filters),
+    expand("deeptools/{filter}_pca.pdf",filter=output_filters),
+    expand("deeptools/{filter}_fingerprint.pdf",filter=output_filters),
+    expand("visualisation_log2/{out_filters}/{IP}.{out_filters}.input.log2.bpm.bw",out_filters=output_filters,IP=compare.IP),
+    expand("macs2/{out_filters}/{IP}_peaks.narrowPeak",out_filters=output_filters,IP=compare.IP),
+    expand("macs2/{out_filters}/{IP}_peaks.broadPeak",out_filters=output_filters,IP=compare.IP)
+
+rule get_fastq:
+  input:
+     raw+"/{sample}.{read}.fq.gz"
+  output:
+     "fastq/{sample}.{read}.fq.gz"
+  shell:
+    "ln -s {input} {output}"
+
+rule fastqc_raw:
+  input:
+   "fastq/{sample}.{read}.fq.gz"
+  threads: 4
+  output:
+   "fastq/{sample}.{read}_fastqc.html"
+  shell:
+   "fastqc-0.11.9 {input}"
+
+rule multiqc_raw:
+  input:
+    expand("fastq/{sample}.{read}_fastqc.html",sample=samples.Sample,read=[1,2])
+  output:
+    "fastq/multiqc_report.html"
+  shell:
+    "multiqc -f fastq -o fastq"
+
+rule cutadapt:
+  input:
+    r1="fastq/{sample}.1.fq.gz",
+    r2="fastq/{sample}.2.fq.gz"
+  params:
+    a1=adapter1,
+    a2=adapter2
+  threads: 4
+  output:
+    p1="cutadapt/{sample}.1.cutadapt.fq.gz",
+    p2="cutadapt/{sample}.2.cutadapt.fq.gz"
+  shell:
+    "cutadapt-1.18 -a {params.a1} -A {params.a2} -j {threads} --minimum-length 20 --nextseq-trim=20 -o {output.p1} -p {output.p2} {input.r1} {input.r2}"
+
+rule cutadapt_fastqc:
+  input:
+   "cutadapt/{sample}.{read}.cutadapt.fq.gz"
+  output:
+   "cutadapt/{sample}.{read}.cutadapt_fastqc.html"
+  shell:
+   "fastqc-0.11.9 {input}"
+
+rule cutadapt_fastq_screen:
+  input:
+    "cutadapt/{sample}.cutadapt.fq.gz"
+  output:
+    "cutadapt/{sample}.cutadapt_screen.txt"
+  params:
+    conf = fs_conf
+  shell:
+    "fastq_screen --conf {params.conf} --outdir cutadapt {input}"
+
+rule cutadapt_multiqc:
+  input:
+    expand("cutadapt/{sample}.{read}.cutadapt_fastqc.html",sample=samples.Sample,read=[1,2]),
+    expand("cutadapt/{sample}.{read}.cutadapt_screen.txt",sample=samples.Sample,read=[1,2])
+  output:
+    "cutadapt/multiqc_report.html"
+  shell:
+    "multiqc -f cutadapt -o cutadapt"
+
+rule mapBWA:
+  input:
+    r1="cutadapt/{sample}.1.cutadapt.fq.gz",
+    r2="cutadapt/{sample}.2.cutadapt.fq.gz"
+  params:
+    index=bwa_index
+  output:
+    temp("bwa/{sample}/{sample}.sam")
+  threads: 5
+  shell:
+    "bwa mem -t {threads} -M {params.index} {input.r1} {input.r2}  > {output}"
+
+rule processBam:
+  input:
+   "bwa/{sample}/{sample}.sam"
+  threads: 5
+  params:
+   prefix="{sample}"
+  output:
+   "bwa/{sample}/{sample}.total.flagstat",
+   "bwa/{sample}/{sample}.total.bam",
+   "bwa/{sample}/{sample}.total.bam.bai",
+   "bwa/{sample}/{sample}.primary.flagstat",
+   "bwa/{sample}/{sample}.primary.bam",
+   "bwa/{sample}/{sample}.primary.bam.bai",
+   "bwa/{sample}/{sample}.unique.flagstat",
+   "bwa/{sample}/{sample}.unique.bam",
+   "bwa/{sample}/{sample}.unique.bam.bai",
+  shell:
+   "bash bin/scripts/processBam_paired.sh {params.prefix}"
+
+rule markDuplicates:
+  input:
+    "bwa/{sample}/{sample}.{filter}.bam"
+  output:
+    bam = "bwa/{sample}/{sample}.{filter}_NR.bam",
+    metric = "bwa/{sample}/{sample}.{filter}_NR.dups.txt",    
+    index = "bwa/{sample}/{sample}.{filter}_NR.bam.bai",
+    fs = "bwa/{sample}/{sample}.{filter}_NR.flagstat"
+  shell:
+    """
+    picard MarkDuplicates -I {input} -O {output.bam} -M {output.metric} --REMOVE_DUPLICATES --VALIDATION_STRINGENCY LENIENT --ASSUME_SORTED
+    samtools index {output.bam}
+    samtools flagstat {output.bam} > {output.fs}
+    fastqc {output.bam}
+    """
+
+rule blacklist_bam:
+  input:
+    bam = "bwa/{sample}/{sample}.{NR_filters}.bam",
+    blacklist = blacklist
+  output:
+    bam = "bwa/{sample}/{sample}.{NR_filters}_bl.bam",
+    index = "bwa/{sample}/{sample}.{NR_filters}_bl.bam.bai",
+    fs = "bwa/{sample}/{sample}.{NR_filters}_bl.flagstat"
+  shell:
+    """
+    bedtools intersect -v -abam {input.bam} -b {input.blacklist} > {output.bam}
+    samtools index {output.bam}
+    samtools flagstat {output.bam} > {output.fs}
+    fastqc {output.bam}
+    """  	
+
+# Conditional execution
+if "blacklist" in config:
+    # Add the rule to the workflow only if the variable exists
+    ruleorder: blacklist_bam
+
+rule readStats:
+  input:
+    expand("bwa/{sample}/{sample}.{filter}.flagstat",sample=samples.Sample,filter=report_filters)
+  params:
+    filt=",".join(report_filters),
+    attr=attributes
+  output:
+    "bwa/readStats.html"
+  shell:
+    """
+    R -e "rmarkdown::render('bin/scripts/readStats.Rmd')" --args "../../bwa" "{params.filt}" "../../samples.tsv" "{params.attr}"
+    mv bin/scripts/readStats.html {output}
+    """
+
+rule bwa_multiqc:
+  input:
+    expand("bwa/{sample}/{sample}.{report_filt}.bam",sample=samples.Sample,report_filt=report_filters)
+  params:
+    files="unique"
+  output:
+    "bwa/multiqc_report.html"
+  shell:
+    "multiqc -f bwa/*/*{params.files}* -o bwa"
+
+rule bamCoverage:
+  input:
+    "bwa/{sample}/{sample}.{out_filters}.bam"
+  output:
+    "visualisation/{sample}.{out_filters}.bpm.bw"
+  threads: 12
+  shell:
+    """
+    bamCoverage -bs 1 --normalizeUsing BPM -p {threads} -b {input} --outFileName {output}
+    """
+
+rule bamCompare:
+  input:
+    b1= "bwa/{IP}/{IP}.{out_filters}.bam",
+    b2= lambda wildcards: "bwa/"+compare_dict[wildcards.IP]+"/"+compare_dict[wildcards.IP]+".{out_filters}.bam"
+  output:
+    "visualisation_log2/{out_filters}/{IP}.{out_filters}.input.log2.bpm.bw"
+  threads: 4
+  shell:
+    """
+    bamCompare -b1 {input.b1} -b2 {input.b2} -o {output} -bs 20 -p {threads} --normalizeUsing BPM --exactScaling --scaleFactorsMethod None
+    """
+
+rule macs2_peaks:
+  input:
+    t= "bwa/{IP}/{IP}.{out_filters}.bam",
+    c= lambda wildcards: "bwa/"+compare_dict[wildcards.IP]+"/"+compare_dict[wildcards.IP]+".{out_filters}.bam"
+  params:
+    dir= "macs2/{out_filters}/",
+    out= "{IP}"
+  output:
+    "macs2/{out_filters}/{IP}_peaks.narrowPeak",
+    "macs2/{out_filters}/{IP}_peaks.broadPeak"
+  shell:
+    """
+    macs2 callpeak -t {input.t} -c {input.c} -g 1.1e9 -f BAMPE --outdir {params.dir} --name {params.out} --tempdir {params.dir}
+    macs2 callpeak -t {input.t} -c {input.c} -g 1.1e9 -f BAMPE --outdir {params.dir} --name {params.out} --broad --tempdir {params.dir}
+    """
+
+rule multiBamSummary:
+  input:
+    lambda wildcards: expand(f"bwa/{{sample}}/{{sample}}.{wildcards.filter}.bam", sample=samples.Sample)
+  params:
+    scale= lambda wildcards: f"deeptools/{wildcards.filter}.sf.txt"
+  threads: 20
+  output:
+    "deeptools/{filter}_matrix.npz"
+  shell:
+    """
+    multiBamSummary-3.5.0 bins -b {input} -o {output} --smartLabels -p {threads} --scalingFactors {params.scale}
+    """
+
+rule plotCorrelation:
+  input:
+    "deeptools/{filter}_matrix.npz",
+  output:
+    uc="deeptools/{filter}_correlation.pdf",
+    up="deeptools/{filter}_pca.pdf"
+  shell:
+    """
+    plotCorrelation -in {input} -c pearson -p heatmap -o {output.uc} --removeOutliers
+    plotPCA -in {input} -o {output.up}
+    """
+
+rule plotFingerprint:
+  input:
+    lambda wildcards: expand(f"bwa/{{sample}}/{{sample}}.{wildcards.filter}.bam", sample=samples.Sample)
+  output:
+    plot = "deeptools/{filter}_fingerprint.pdf",
+    counts = "deeptools/{filter}_fingerprint.tsv"
+  threads: 5
+  shell:
+    "plotFingerprint -b {input} -plot {output.plot} --outRawCounts {output.counts} -e --smartLabels -bs 1000 --skipZeros --region chr1 -p {threads}"

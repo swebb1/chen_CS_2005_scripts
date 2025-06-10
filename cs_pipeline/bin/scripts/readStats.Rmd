@@ -1,0 +1,216 @@
+---
+title: "Read Mapping Statistics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+   rmd: "readStats.Rmd"
+output:
+  html_document:
+  highlight: tango
+  number_sections: no
+  theme: default
+  toc: yes
+  toc_depth: 3
+  toc_float:
+    collapsed: no
+    smooth_scroll: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+###Needs to be more generic, use column name order as factor order, then dynamic number of colours, bars etc based on level of filtering 
+```
+
+```{r load, include=F}
+library(tidyverse)
+
+args = commandArgs(trailingOnly=TRUE)
+#args = c("../../bwa","total,primary_gg7b,unique_gg7b","../../samples.tsv","Sample,Cell_stage,Type,Protein")
+
+#Get filters
+filters=strsplit(args[2],",") %>% unlist()
+#Get flagstat files - remove multiqc files
+fs <- list.files(args[1],pattern=".flagstat$",recursive = T,full.names = T)
+fs <- fs[grep("multiqc",fs,invert = T)]
+
+##Read in flagstat total reads into list
+k<-list()
+l <- length(fs)
+for (i in 1:l){
+  parse=strsplit(basename(fs[i]),"\\.")[[1]]
+  lp<-length(parse)
+  name=paste(parse[1:(lp-2)],collapse=".")
+  filter=parse[lp-1]
+  reads<- strsplit(read_tsv(fs[i],col_names = F)[1,] %>% unlist()," ")[[1]][1]
+  #k[[name]][filter] <- reads
+  k[[filter]][name] <- reads
+}
+
+##Unlist to dataframe and print
+df<-as.data.frame(k[filters],stringsAsFactors = F) %>% rownames_to_column("Sample") %>% 
+  select(Sample,all_of(filters)) %>% 
+  mutate(across(all_of(filters),as.numeric))
+
+write.table(df,paste0(args[1],"/readstats.tsv"),quote=F,sep="\t",row.names = F,col.names = T)
+
+```
+
+
+```{r data, include=F}
+library(DT)
+
+##Columns to use from sample sheet
+c<-strsplit(args[4],",") %>% unlist()
+##Sample sheet
+sample<-read_tsv(args[3]) %>% select(all_of(c))
+##Unordered read count table with filtered read numbers
+#t<-read_tsv(col_names=T,snakemake@input[[2]])
+
+##Get as % of total reads (assumed column 2)
+t2<-df
+for(i in 3:length(names(t2))){
+  t2[,i]<-(t2[,i]/t2[,2])*100
+}
+t2[,2]<-100
+
+#Get facet variable
+f<-NULL
+#if("facet" %in% names(snakemake@params)){
+#  f<-snakemake@params[["facet"]]
+#  sample[,f]<-fct_relevel(pull(sample,f),unique(pull(sample,f))#)
+#}
+
+#Join sample info to stats
+s<-inner_join(sample,df,"Sample")
+s2<-inner_join(sample,t2,"Sample")
+
+##Order by samples tsv file
+s$Sample<-fct_relevel(s$Sample,s$Sample)
+s2$Sample<-fct_relevel(s2$Sample,s2$Sample)
+
+#Convert to long format
+sm<-s %>%  pivot_longer(-all_of(c),names_to="Reads",values_to="Count")
+sm2<-s2 %>%  pivot_longer(-all_of(c),names_to="Reads",values_to="Count")
+
+##Relevel factor plotting
+sm$Reads<-fct_relevel(sm$Reads,names(df)[-1])
+sm2$Reads<-fct_relevel(sm2$Reads,names(df)[-1])
+
+##Set colours
+library(unikn)
+library(RColorBrewer)
+
+cols<- usecol(c("steelblue",
+                rgb(red = 52, green = 168, blue = 83, maxColorValue = 255),
+                "gold", "#ea4335", brewer.pal(n=8,name = "Set2")))
+
+greys<-brewer.pal(n=9,name = "Greys")[3:7]
+
+```
+
+## Total Reads
+
+```{r plot, echo=F}
+
+#Create plot
+
+p1<-ggplot(sm,aes(Sample,Count/1000000,fill=Reads))+
+  geom_bar(stat="identity",position="dodge")+
+  ylab("Reads (millions)")+
+  xlab("Sample")+
+  scale_fill_manual(values = cols)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 75,hjust=1))
+
+#Facet
+if(!is.null(f)){
+  p1<-p1+facet_grid(as.formula(paste0("Reads ~", f)), scales = "free_x", space = "free")+
+    theme(strip.text.y = element_blank())
+}else{
+  p1<-p1+facet_wrap(~Reads,ncol = 1)+
+    theme(strip.text.x = element_blank())
+}
+    
+p1
+```
+
+```{r table, echo=F}
+
+#Create DT
+dt<-DT::datatable(s,options = list(pageLength=50))
+
+#Highlight facet if exists
+if(!is.null(f)){
+  dt<-dt %>% formatStyle(
+    f,
+    backgroundColor = styleEqual(
+      unique(pull(s,f)), greys[1:length(unique(pull(s,f)))]
+    )
+  )
+}
+#Colour read columns
+for(i in 1:length(levels(sm$Reads))){
+  dt<-dt %>% 
+  formatStyle(
+    levels(sm$Reads)[i],
+    background = styleColorBar(pull(s,levels(sm$Reads)[i]), cols[i])
+  )
+}
+  
+dt
+
+```
+
+## Read % of Total
+
+
+```{r plot2, echo=F}
+
+#Create plot
+p2<-ggplot(sm2,aes(Sample,Count,fill=Reads))+
+  geom_bar(stat="identity",position="dodge")+
+  ylab("Read %")+
+  xlab("Sample")+
+  scale_fill_manual(values = cols)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 75,hjust=1))
+
+#Facet
+if(!is.null(f)){
+  p2<-p2+facet_grid(as.formula(paste0("Reads ~", f)), scales = "free_x", space = "free")+
+    theme(strip.text.y = element_blank())
+}else{
+  p2<-p2+facet_wrap(~Reads,ncol = 1)+
+    theme(strip.text.x = element_blank())
+}
+    
+p2
+```
+
+```{r table2, echo=F}
+
+#Create DT
+dt2<-DT::datatable(s2,options = list(pageLength=50)) %>% formatRound(names(t2)[-1])
+
+#Highlight facet if exists
+if(!is.null(f)){
+  dt2<-dt2 %>% formatStyle(
+    f,
+    backgroundColor = styleEqual(
+      unique(pull(s2,f)), greys[1:length(unique(pull(s2,f)))]
+    )
+  )
+}
+#Colour read columns
+for(i in 1:length(levels(sm2$Reads))){
+  dt2<-dt2 %>% 
+  formatStyle(
+    levels(sm2$Reads)[i],
+    background = styleColorBar(0:100, cols[i])
+  )
+}
+  
+dt2
+```
+
+
